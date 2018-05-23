@@ -279,7 +279,7 @@ def get_active_testcases(repo_dir):
 
 def get_test_files():
     """Finds all test files."""
-    for root, __, files in os.walk('./'):
+    for root, __, files in os.walk('./cfme/tests/'):
         for _file in files:
             if '.py' in _file and 'test_' in _file:
                 yield '{}/{}'.format(root, _file)
