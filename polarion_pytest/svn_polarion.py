@@ -80,6 +80,29 @@ class WorkItemCache(object):
                 steps.append(rec.text)
         return steps, expected_results
 
+    @staticmethod
+    def _get_linked_items(item):
+        linked = []
+        linked_items = item.xpath('./list/struct')
+        for struct in linked_items:
+            role_found = False
+            struct_item = None
+
+            for litem in struct:
+                attrib = litem.attrib['id']
+                if attrib == 'role':
+                    if litem.text == 'verifies':
+                        role_found = True
+                    else:
+                        break
+                elif attrib == 'workItem':
+                    struct_item = litem.text
+
+            if role_found and struct_item:
+                linked.append(struct_item)
+
+        return linked
+
     def __getitem__(self, work_item_id):
         if work_item_id in self._cache:
             return self._cache[work_item_id]
@@ -91,10 +114,13 @@ class WorkItemCache(object):
             return None
 
         for item in tree.xpath('/work-item/field'):
-            if item.attrib['id'] == 'testSteps':
+            attrib = item.attrib['id']
+            if attrib == 'testSteps':
                 steps, results = self._get_steps(item)
                 self._cache[work_item_id]['testSteps'] = steps
                 self._cache[work_item_id]['expectedResults'] = results
+            elif attrib == 'linkedWorkItems':
+                self._cache[work_item_id]['linkedWorkItems'] = self._get_linked_items(item)
             else:
                 self._cache[work_item_id][item.attrib['id']] = item.text
 
@@ -102,6 +128,7 @@ class WorkItemCache(object):
             self._cache[work_item_id] = InvalidObject()
             return None
 
+        self._cache[work_item_id]['work_item_id'] = work_item_id
         if 'assignee' not in self._cache[work_item_id]:
             self._cache[work_item_id]['assignee'] = ''
         if 'title' not in self._cache[work_item_id]:

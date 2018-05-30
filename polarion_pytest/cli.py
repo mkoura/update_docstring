@@ -11,6 +11,7 @@ import re
 import textwrap
 
 from polarion_docstrings import polarion_fields as pf
+from polarion_pytest.requirements_mapping import REQUIREMENTS_MAP
 from polarion_pytest.svn_polarion import PolarionTestcases
 from polarion_pytest.testinfo import CurrentTest, CurrentTier
 
@@ -40,16 +41,27 @@ class TestsTransform(object):
             to_string.append(string)
 
     @staticmethod
-    def append_tier(polarion_data, line):
+    def get_tier(polarion_data):
         caselevel = polarion_data.get('caselevel', 'component')
         if not polarion_data:
-            return line
+            return None
         # if default value, no need to specify explicitly
         if pf.POLARION_FIELDS['caselevel'] == caselevel:
+            return None
+        return pf.CASELEVELS[caselevel]
+
+    def get_tier_annotation(self, polarion_data):
+        tier = self.get_tier(polarion_data)
+        if not tier:
+            return None
+        return '@pytest.mark.tier({})'.format(tier)
+
+    def append_tier(self, polarion_data, line):
+        tier_annotation = self.get_tier_annotation(polarion_data)
+        if not tier_annotation:
             return line
-        tier = pf.CASELEVELS[caselevel]
         method_indent = len(line) - len(line.lstrip(' '))
-        return '{}@pytest.mark.tier({})\n{}'.format(method_indent * ' ', tier, line)
+        return '{}{}\n{}'.format(method_indent * ' ', tier_annotation, line)
 
     @staticmethod
     def get_testcase_data(testcase_name, active_testcases):
@@ -114,58 +126,119 @@ class TestsTransform(object):
 
         return new_steps
 
-    def _format_polarion_data(self, polarion_data):
-        data_list = []
+    def _get_formatted_steps(self, polarion_data):
         steps = []
         results = []
-        ommit_keys = ['caseautomation', 'caselevel', 'description', 'testSteps', 'expectedResults']
-
-        # "caseautomation" is not "automated" when it's present
-        if 'caseautomation' not in polarion_data:
-            for key in pf.MANUAL_ONLY_FIELDS:
-                ommit_keys.append(key)
-
-        title = polarion_data.get('title', '')
-        if 'test_' in title and len(title) <= 85:
-            del polarion_data['title']
 
         if polarion_data.get('testSteps'):
             new_steps = self._format_steps(polarion_data['testSteps'])
             if new_steps:
-                steps = ['Steps:']
+                steps = ['testSteps:']
                 steps.extend(new_steps)
 
         if polarion_data.get('expectedResults'):
             new_results = self._format_steps(polarion_data['expectedResults'])
             if new_results:
-                results = ['Results:']
+                results = ['expectedResults:']
                 results.extend(new_results)
+
+        return steps, results
+
+    @staticmethod
+    def _transform_polarion_data(polarion_data):
+        title = polarion_data.get('title', '')
+        if 'test_' in title and len(title) <= 85:
+            del polarion_data['title']
+
+        if polarion_data.get('linkedWorkItems'):
+            new_linked = ', '.join(polarion_data.get('linkedWorkItems'))
+            polarion_data['linkedWorkItems'] = new_linked
 
         casecomponent = polarion_data.get('casecomponent')
         if casecomponent and casecomponent in pf.CASECOMPONENT_MAP:
             casecomponent = pf.CASECOMPONENT_MAP[casecomponent]
             polarion_data['casecomponent'] = casecomponent
 
+        setup = polarion_data.get('setup')
+        if setup:
+            new_setup = _sanitize_paragraph(setup)
+            polarion_data['setup'] = new_setup
+
+        teardown = polarion_data.get('teardown')
+        if teardown:
+            new_teardown = _sanitize_paragraph(teardown)
+            polarion_data['teardown'] = new_teardown
+
+    @staticmethod
+    def _wrap_values(polarion_data):
+        ommit_keys = {
+            'casecomponent',
+            'setup',
+            'teardown',
+            'description',
+            'testSteps',
+            'expectedResults',
+            'linkedWorkItems',
+        }
+
+        for key in set(polarion_data) - ommit_keys:
+            line = polarion_data[key]
+
+            if not line or isinstance(line, list):
+                continue
+
+            if key not in pf.VALID_VALUES:
+                line = _sanitize_string(line)
+            line = line.strip()
+
+            # wrap line if too long
+            if len(line) > 80:
+                line = textwrap.wrap(line, width=60)
+            elif '\n' in line:
+                line = line.replace('\n', ' ')
+                line = re.sub(' +', ' ', line)
+
+            polarion_data[key] = line
+
+    def format_polarion_data(self, polarion_data):
+        data_list = []
+        ommit_keys = [
+            'caseautomation',
+            'caselevel',
+            'description',
+            'testSteps',
+            'expectedResults',
+            'work_item_id',
+        ]
+
+        # "caseautomation" is not "automated" when it's present
+        if 'caseautomation' not in polarion_data:
+            for key in pf.MANUAL_ONLY_FIELDS:
+                ommit_keys.append(key)
+
+        steps, results = self._get_formatted_steps(polarion_data)
+        self._transform_polarion_data(polarion_data)
+        self._wrap_values(polarion_data)
+
         for key in sorted(polarion_data):
             if key in ommit_keys:
                 continue
-            value = polarion_data[key]
-            if value:
-                if key not in pf.VALID_VALUES:
-                    value = _sanitize_string(value)
-                value = value.strip()
-            else:
-                value = ''
+
+            lines = polarion_data[key] or []
+            first_line = None
+            if lines:
+                if isinstance(lines, list):
+                    first_line = lines[0]
+                    lines = lines[1:]
+                else:
+                    first_line = lines
+                    lines = []
+
             key_indent = (len(key) + 2) * ' '
 
-            # wrap line if too long
-            values = []
-            if len(value) > 80:
-                values = textwrap.wrap(value, width=60)
-                value = values.pop(0)
-
-            data_list.append('{}: {}'.format(key, value or None))
-            for val in values:
+            if first_line or key in pf.REQUIRED_FIELDS:
+                data_list.append('{}: {}'.format(key, first_line or None))
+            for val in lines:
                 data_list.append('{}{}'.format(key_indent, val))
 
         data_list.extend(steps)
@@ -183,7 +256,7 @@ class TestsTransform(object):
         polarion_docstrings.append('{}Polarion:'.format(indent))
         pol_indent = '{}{}'.format(indent, 4 * ' ')
 
-        lines = self._format_polarion_data(polarion_data)
+        lines = self.format_polarion_data(polarion_data)
         for line in lines:
             polarion_docstrings.append('{}{}'.format(pol_indent, line))
         return '\n'.join(polarion_docstrings)
@@ -262,6 +335,20 @@ def _sanitize_string(string):
     return string
 
 
+def _sanitize_paragraph(paragraph):
+    if not paragraph:
+        return None
+    new_paragraph = _sanitize_string(paragraph)
+    if not new_paragraph:
+        return None
+
+    desc_lines = new_paragraph.split('\n')
+    new_lines = []
+    for line in desc_lines:
+        new_lines.extend(textwrap.wrap(line.strip()))
+    return new_lines
+
+
 def get_active_testcases(repo_dir):
     """Gets active testcases in Polarion."""
     polarion_testcases = PolarionTestcases(repo_dir)
@@ -308,15 +395,39 @@ def gen_modified_content(pyfile, active_testcases, tests_transform):
     return None
 
 
+def get_requirements_db():
+    req_db = {}
+    for req_name, req_ids in REQUIREMENTS_MAP.items():
+        for req_id in req_ids:
+            req_db[req_id] = req_name
+    return req_db
+
+
+def get_requirement_annotation(polarion_data, req_db):
+    req = polarion_data.get('linkedWorkItems')
+    if not req:
+        return None
+
+    del polarion_data['linkedWorkItems']
+    req = req.pop()
+    req_name = req_db.get(req)
+    if not req_name:
+        return None
+
+    return '@test_requirements.{}'.format(req_name)
+
+
 def manual_tests_header():
     return [
         '# -*- coding: utf-8 -*-',
         '# pylint: skip-file',
-        '"""Manual tests"""\n\n'
-        'import pytest\n\n']
+        '"""Manual tests"""\n',
+        'import pytest\n',
+        'from cfme import test_requirements\n\n',
+    ]
 
 
-def add_manual_test(test_name, polarion_data, tests_transform):
+def add_manual_test(test_name, polarion_data, tests_transform, req_db):
     lines = ['@pytest.mark.manual']
     indent = 4 * ' '
 
@@ -339,8 +450,13 @@ def add_manual_test(test_name, polarion_data, tests_transform):
     if 'test_' not in new_test_name:
         new_test_name = 'test_{}'.format(new_test_name)
 
-    test_def = tests_transform.append_tier(polarion_data, 'def {}():'.format(new_test_name))
-    lines.append(test_def)
+    req_annotation = get_requirement_annotation(polarion_data, req_db)
+    if req_annotation:
+        lines.append(req_annotation)
+    tier_annotation = tests_transform.get_tier_annotation(polarion_data)
+    if tier_annotation:
+        lines.append(tier_annotation)
+    lines.append('def {}():'.format(new_test_name))
 
     description = polarion_data.get('description') or []
     new_description = ['{}{}'.format(indent, line) for line in description if line]
@@ -362,13 +478,9 @@ def sanitize_description(polarion_data):
     if not description:
         return
 
-    new_description = _sanitize_string(description)
+    new_description = _sanitize_paragraph(description)
     if new_description:
-        desc_lines = new_description.split('\n')
-        new_lines = []
-        for line in desc_lines:
-            new_lines.extend(textwrap.wrap(line.strip()))
-        polarion_data['description'] = new_lines
+        polarion_data['description'] = new_description
     else:
         del polarion_data['description']
 
@@ -378,8 +490,6 @@ def _get_manual_polarion_data(testcase_name, active_testcases, tests_transform):
     for testcase_id in active_testcases.available_testcases[testcase_name]:
         testcase_data = active_testcases.wi_cache[testcase_id] or {}
         if testcase_data.get('caseautomation') != 'automated':
-            # TODO: remove once ready
-            testcase_data['test_id'] = testcase_id
             multi_polarion_data.append(tests_transform.filter_testcase_fields(testcase_data))
     return multi_polarion_data
 
@@ -388,6 +498,10 @@ def gen_manual_testcases(active_testcases, tests_transform):
     all_lines = manual_tests_header()
     manual_testcases = active_testcases.get_manual_testcases()
     to_process = set(manual_testcases) - set(tests_transform.manual_tests_seen)
+    if not to_process:
+        return all_lines
+
+    req_db = get_requirements_db()
 
     for test_name in to_process:
         multi_polarion_data = _get_manual_polarion_data(
@@ -397,7 +511,7 @@ def gen_manual_testcases(active_testcases, tests_transform):
             continue
         for polarion_data in multi_polarion_data:
             sanitize_description(polarion_data)
-            test_lines = add_manual_test(test_name, polarion_data, tests_transform)
+            test_lines = add_manual_test(test_name, polarion_data, tests_transform, req_db)
             all_lines.extend(test_lines)
 
     return all_lines
