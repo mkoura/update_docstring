@@ -202,28 +202,25 @@ class TestsTransform(object):
 
     def format_polarion_data(self, polarion_data):
         data_list = []
-        ommit_keys = [
+        ommit_keys = {
             'caseautomation',
             'caselevel',
             'description',
             'testSteps',
             'expectedResults',
             'work_item_id',
-        ]
+        }
 
         # "caseautomation" is not "automated" when it's present
         if 'caseautomation' not in polarion_data:
             for key in pf.MANUAL_ONLY_FIELDS:
-                ommit_keys.append(key)
+                ommit_keys.add(key)
 
         steps, results = self._get_formatted_steps(polarion_data)
         self._transform_polarion_data(polarion_data)
         self._wrap_values(polarion_data)
 
-        for key in sorted(polarion_data):
-            if key in ommit_keys:
-                continue
-
+        for key in sorted(set(polarion_data) - ommit_keys):
             lines = polarion_data[key] or []
             first_line = None
             if lines:
@@ -323,7 +320,6 @@ def _sanitize_string(string):
     string = re.sub('<br ?/?>', r'\n', string)
     string = re.sub('<[^>]+>', '', string)
     string = re.sub(' *\n', '\n', string)
-    string = re.sub(r'(\n)+', r'\n', string)
     string = (string
               .replace('&npsp;', ' ')
               .replace('&gt;', '>')
@@ -331,7 +327,9 @@ def _sanitize_string(string):
               .replace('&quot;', '"')
               .replace('&amp;', '&')
               .replace('&#39;', '"')
+              .replace('&#10;', '\n')
               .replace(u'\xa0', u' '))
+    string = re.sub(r'(\n)+', r'\n', string)
     return string
 
 
